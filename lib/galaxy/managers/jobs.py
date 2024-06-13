@@ -1,12 +1,12 @@
 import json
 import logging
-import typing
 from datetime import (
     date,
     datetime,
 )
 from typing import (
     cast,
+    Dict,
     List,
 )
 
@@ -32,12 +32,14 @@ from galaxy.exceptions import (
     ItemAccessibilityException,
     ObjectNotFound,
     RequestParameterInvalidException,
+    RequestParameterMissingException,
 )
 from galaxy.job_metrics import (
     RawMetric,
     Safety,
 )
 from galaxy.managers.collections import DatasetCollectionManager
+from galaxy.managers.context import ProvidesUserContext
 from galaxy.managers.datasets import DatasetManager
 from galaxy.managers.hdas import HDAManager
 from galaxy.managers.lddas import LDDAManager
@@ -106,7 +108,7 @@ class JobManager:
         self.app = app
         self.dataset_manager = DatasetManager(app)
 
-    def index_query(self, trans, payload: JobIndexQueryPayload) -> sqlalchemy.engine.Result:
+    def index_query(self, trans: ProvidesUserContext, payload: JobIndexQueryPayload) -> sqlalchemy.engine.ScalarResult:
         """The caller is responsible for security checks on the resulting job if
         history_id, invocation_id, or implicit_collection_jobs_id is set.
         Otherwise this will only return the user's jobs or all jobs if the requesting
@@ -209,8 +211,13 @@ class JobManager:
                 stmt = stmt.outerjoin(Job.user)
         else:
             if history_id is None and invocation_id is None and implicit_collection_jobs_id is None:
-                stmt = stmt.where(Job.user_id == trans.user.id)
-            # caller better check security
+                # If we're not filtering on history, invocation or collection we filter the jobs owned by the current user
+                if trans.user:
+                    stmt = stmt.where(Job.user_id == trans.user.id)
+                elif trans.galaxy_session:
+                    stmt = stmt.where(Job.session_id == trans.galaxy_session.id)
+                else:
+                    raise RequestParameterMissingException("A session is required to list jobs for anonymous users")
 
         stmt = build_and_apply_filters(stmt, payload.states, lambda s: model.Job.state == s)
         stmt = build_and_apply_filters(stmt, payload.tool_ids, lambda t: model.Job.tool_id == t)
@@ -647,7 +654,7 @@ class JobSearch:
         return stmt
 
 
-def view_show_job(trans, job: Job, full: bool) -> typing.Dict:
+def view_show_job(trans, job: Job, full: bool) -> Dict:
     is_admin = trans.user_is_admin
     job_dict = job.to_dict("element", system_details=is_admin)
     if trans.app.config.expose_dataset_path and "command_line" not in job_dict:
